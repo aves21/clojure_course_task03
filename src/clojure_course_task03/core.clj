@@ -201,39 +201,90 @@
   
   )
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; TBD: Implement the following macros
-;;
-
 (defmacro group [name & body]
-  ;; Пример
-  ;; (group Agent
-  ;;      proposal -> [person, phone, address, price]
-  ;;      agents -> [clients_id, proposal_id, agent])
-  ;; 1) Создает группу Agent
-  ;; 2) Запоминает, какие таблицы (и какие колонки в таблицах)
-  ;;    разрешены в данной группе.
-  ;; 3) Создает следующие функции
-  ;;    (select-agent-proposal) ;; select person, phone, address, price from proposal;
-  ;;    (select-agent-agents)  ;; select clients_id, proposal_id, agent from agents;
-  )
+  (let [built-def (fn [ table-name fields]
+                        (let [allowed-fileds# (doall (vec (map keyword fields)))]
+                         (list 
+                           (list 'swap! 'tables-names  'conj (keyword (str table-name)))
+                           (list 'def (symbol (str "-" (clojure.string/lower-case (str name)) "-" (str table-name) "-fields" )) allowed-fileds#)
+                           (list 'defn (symbol (str "select-" (clojure.string/lower-case (str name)) "-" table-name )) [] 
+                             (list 'let [ (symbol (str table-name "-fields-var")) allowed-fileds#] 
+                               (list 'select (symbol (str table-name)) 
+                                 (list 'fields :all)))))))
+        
+        check-error (loop [error (if-not (= '-> (second body))
+                                  (throw (Exception. "Macros group must have format    (group Agent   proposal -> [person, phone, address, price]  agents -> [clients_id, proposal_id, agent])")))
+                           data (nnext (next body))]
+                      (if (nil? data )
+                        nil
+                        (recur (if-not (= '-> ( second data))
+                                  (throw (Exception. "Macros group must have format    (group Agent   proposal -> [person, phone, address, price]  agents -> [clients_id, proposal_id, agent])")))
+                          (nnext (next data)))) )
+        
+        defs (loop [table-name (first body)
+                   fields (nth body 2)
+                   data (nnext (next body))
+                   res '() ]
+                (if (nil? table-name) 
+                  res
+                (recur (first data) (nth data 2) (nnext (next data)) (conj res (built-def table-name fields)))))
+        
+        defs-with-atom (if-not (nil? (resolve 'tables-names)) 
+               defs
+              (conj defs (list ( list 'def 'tables-names ( list 'atom  #{} )))))
+        
+        result# (conj (apply concat defs-with-atom) 'do)]
+       `~result#
+        
+    )  
+)
 
 (defmacro user [name & body]
-  ;; Пример
-  ;; (user Ivanov
-  ;;     (belongs-to Agent))
-  ;; Создает переменные Ivanov-proposal-fields-var = [:person, :phone, :address, :price]
-  ;; и Ivanov-agents-fields-var = [:clients_id, :proposal_id, :agent]
+  (let [concat-fields (fn [role table result]
+                        (let [has-variable (resolve (symbol (str "-" (clojure.string/lower-case (str role)) "-" (clojure.core/name table) "-fields" )))
+                              current-fields (if (nil? has-variable) 
+                                               nil
+                                               (eval (symbol (str "-" (clojure.string/lower-case (str role)) "-" (clojure.core/name table) "-fields" ))))]
+                          (cond 
+                            (nil? current-fields) result
+                            (= :all (first (table result))) result
+                            (= :all (first current-fields)) (assoc result table [:all])
+                            (nil? (first (table result))) (assoc result table current-fields)
+                            :else (->> (concat current-fields (table result))
+                                        set
+                                        (into [])
+                                        (assoc result table)))))
+        
+        concat-tables (fn [role res]
+                        (let [all-tables-keys  ( if-not (nil? (resolve 'tables-names)) (eval '@tables-names))]
+                          (loop [current-table (first all-tables-keys)
+                                 rest-tables (next all-tables-keys)
+                                 result res ]
+                            (if (nil? current-table)
+                              result
+                              (recur (first rest-tables) (next rest-tables) (concat-fields role current-table result))))))
+        
+        formated-body (apply concat body)
+        
+        error (if-not (= 'belongs-to ( first formated-body))
+                (throw (Exception. "Macros user must have format  (user Directorov  (belongs-to Operator, Agent, Director))")))
+        
+        rez-fields (loop [role (second formated-body)
+                          data (nnext formated-body)
+                          res {}]
+                     (if (nil? role)
+                       res
+                       (recur (first data) (next data) (concat-tables role res))))
+        
+        defs (doall (map #(list 'def (symbol (str name "-" (clojure.core/name (nth % 0)) "-fields-var" )) (nth % 1))  rez-fields))
+        
+        result# (conj defs 'do)]
+    `~result#
+    ) 
   )
 
 (defmacro with-user [name & body]
-  ;; Пример
-  ;; (with-user Ivanov
-  ;;   . . .)
-  ;; 1) Находит все переменные, начинающиеся со слова Ivanov, в *user-tables-vars*
-  ;;    (Ivanov-proposal-fields-var и Ivanov-agents-fields-var)
-  ;; 2) Создает локальные привязки без префикса Ivanov-:
-  ;;    proposal-fields-var и agents-fields-var.
-  ;;    Таким образом, функция select, вызванная внутри with-user, получает
-  ;;    доступ ко всем необходимым переменным вида <table-name>-fields-var.
+  (let [table-name (second (apply concat body))]
+    `(let [~(symbol(str table-name "-fields-var"))  ~(eval (symbol (str (str name) "-" (str table-name) "-fields-var" )))]
+       ~@body)) 
   )
